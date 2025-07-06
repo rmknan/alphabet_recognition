@@ -1,0 +1,7 @@
+../Src/ts_calibration.c:77:6:Touchscreen_Calibration	4
+../Src/ts_calibration.c:126:13:TouchscreenCalibration_SetHint	1
+../Src/ts_calibration.c:149:13:GetPhysValues	1
+../Src/ts_calibration.c:175:13:WaitForPressedState	4
+../Src/ts_calibration.c:206:10:Calibration_GetX	1
+../Src/ts_calibration.c:216:10:Calibration_GetY	1
+../Src/ts_calibration.c:226:9:IsCalibrationDone	1
