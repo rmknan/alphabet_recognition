@@ -112,14 +112,14 @@ int main(void)
 
 	/* Loading the model */
 //	const tflite::Model * model  = tflite::GetModel(model_int8_tflite);
-	const tflite::Model * model  = tflite::GetModel(emnist_model);
-	if(model->version() != TFLITE_SCHEMA_VERSION)
-	{
-		error_reporter->Report("Model provided is schema version %d not equal"
-							  "to supported version %d.\n",
-							  model->version(), TFLITE_SCHEMA_VERSION);
-		return 1;
-	}
+//	const tflite::Model * model  = tflite::GetModel(emnist_model);
+//	if(model->version() != TFLITE_SCHEMA_VERSION)
+//	{
+//		error_reporter->Report("Model provided is schema version %d not equal"
+//							  "to supported version %d.\n",
+//							  model->version(), TFLITE_SCHEMA_VERSION);
+//		return 1;
+//	}
 
 	static tflite::MicroMutableOpResolver<4> micro_op_resolver;
 	micro_op_resolver.AddConv2D();
@@ -130,17 +130,17 @@ int main(void)
 	const int tensor_arena_size = 30*1024;
 	static uint8_t tensor_arena[tensor_arena_size];
 
-	static tflite::MicroInterpreter static_interpreter(model, micro_op_resolver, tensor_arena, tensor_arena_size);
+//	static tflite::MicroInterpreter static_interpreter(model, micro_op_resolver, tensor_arena, tensor_arena_size);
 
-	TfLiteStatus allocate_status = static_interpreter.AllocateTensors();
-	if( allocate_status != kTfLiteOk)
-	{
-		TF_LITE_REPORT_ERROR(error_reporter, "AllocateTensor() failed");
-		return 1;
-	}
-
-	input = static_interpreter.input(0);
-	output = static_interpreter.output(0);
+//	TfLiteStatus allocate_status = static_interpreter.AllocateTensors();
+//	if( allocate_status != kTfLiteOk)
+//	{
+//		TF_LITE_REPORT_ERROR(error_reporter, "AllocateTensor() failed");
+//		return 1;
+//	}
+//
+//	input = static_interpreter.input(0);
+//	output = static_interpreter.output(0);
 
 	/* --- End of Tiny-ML Initialization --- */
 
@@ -161,12 +161,12 @@ int main(void)
 
 			/* invoke interpreter and print the results */
 			uint32_t initial = HAL_GetTick();
-			TfLiteStatus invoke_status = static_interpreter.Invoke();
-			if( invoke_status != kTfLiteOk)
-			{
-				TF_LITE_REPORT_ERROR(error_reporter, "Invoke() failed");
-				return 1;
-			}
+//			TfLiteStatus invoke_status = static_interpreter.Invoke();
+//			if( invoke_status != kTfLiteOk)
+//			{
+//				TF_LITE_REPORT_ERROR(error_reporter, "Invoke() failed");
+//				return 1;
+//			}
 			uint32_t current = HAL_GetTick();
 
 			int8_t result = get_top_prediction(output->data.int8, kNumberOfOutputs);
