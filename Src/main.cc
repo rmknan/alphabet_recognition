@@ -6,12 +6,24 @@
  *
  *  Brief: Main Functions
  */
-
+#ifdef __cplusplus
+extern "C" {
+#endif
 /* Start of includes */
 #include <stdio.h>
 #include "main.h"
 #include "debug.h"
 #include "menu_images.h"
+#include "stm32f4xx_hal.h"
+#include "stm32f4xx_hal_uart.h"
+#include "stm32f4xx_hal_gpio.h"
+
+
+void Error_Handler(void);
+
+#ifdef __cplusplus
+}
+#endif
 /* End of include */
 
 /* Start of Tiny ML includes */
@@ -48,16 +60,42 @@ static void update_tensor_input(TfLiteTensor * in);
 static uint8_t get_top_prediction(const int8_t* predictions, uint8_t num_categories);
 static void print_result(uint8_t number, uint32_t tim);
 
+void MX_USART1_UART_Init(void);
+void Error_Handler(void);
+
+__attribute__((section(".ccmram"))) uint8_t tensor_arena[64 * 1024];
+
+UART_HandleTypeDef huart1;
+
+void HAL_UART_MspInit(UART_HandleTypeDef* huart)
+{
+    // Leave empty or just return
+    (void)huart;
+}
+
+
+int __io_putchar(int ch) {
+    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+    return ch;
+}
+
 int main(void)
 {
+
 	/* Hal Init */
 	HAL_Init();
 
 	/* Configure the system clock to 168 MHz */
 	SystemClock_Config();
 
+	// Debugging USART
+	__HAL_RCC_GPIOA_CLK_ENABLE();
+	__HAL_RCC_USART2_CLK_ENABLE();
+
 	/* Configure debug port */
 	debug_init();
+
+
 
 	/* Sending msg by uart */
 	printf("Tiny ML - Handwritten number Recognition!\n");
@@ -70,15 +108,16 @@ int main(void)
 
 	/* Initialize the LCD */
 	BSP_LCD_Init();
+	MX_USART1_UART_Init();
 
 	/* Layer2 Init */
-	BSP_LCD_LayerDefaultInit(1, LCD_FRAME_BUFFER_LAYER1);
-	/* Set Foreground Layer */
-	BSP_LCD_SelectLayer(1);
-	/* Clear the LCD */
-	BSP_LCD_Clear(LCD_COLOR_WHITE);
-	BSP_LCD_SetColorKeying(1, LCD_COLOR_WHITE);
-	BSP_LCD_SetLayerVisible(1, DISABLE);
+//	BSP_LCD_LayerDefaultInit(1, LCD_FRAME_BUFFER_LAYER1);
+//	/* Set Foreground Layer */
+//	BSP_LCD_SelectLayer(1);
+//	/* Clear the LCD */
+//	BSP_LCD_Clear(LCD_COLOR_WHITE);
+//	BSP_LCD_SetColorKeying(1, LCD_COLOR_WHITE);
+//	BSP_LCD_SetLayerVisible(1, DISABLE);
 
 	/* Layer1 Init */
 	BSP_LCD_LayerDefaultInit(0, LCD_FRAME_BUFFER_LAYER0);
@@ -112,14 +151,14 @@ int main(void)
 
 	/* Loading the model */
 //	const tflite::Model * model  = tflite::GetModel(model_int8_tflite);
-//	const tflite::Model * model  = tflite::GetModel(emnist_model);
-//	if(model->version() != TFLITE_SCHEMA_VERSION)
-//	{
-//		error_reporter->Report("Model provided is schema version %d not equal"
-//							  "to supported version %d.\n",
-//							  model->version(), TFLITE_SCHEMA_VERSION);
-//		return 1;
-//	}
+	const tflite::Model * model  = tflite::GetModel(emnist_model);
+	if(model->version() != TFLITE_SCHEMA_VERSION)
+	{
+		error_reporter->Report("Model provided is schema version %d not equal"
+							  "to supported version %d.\n",
+							  model->version(), TFLITE_SCHEMA_VERSION);
+		return 1;
+	}
 
 	static tflite::MicroMutableOpResolver<4> micro_op_resolver;
 	micro_op_resolver.AddConv2D();
@@ -127,20 +166,62 @@ int main(void)
 	micro_op_resolver.AddFullyConnected();
 	micro_op_resolver.AddReshape();
 
-	const int tensor_arena_size = 30*1024;
-	static uint8_t tensor_arena[tensor_arena_size];
+	const int tensor_arena_size = sizeof(tensor_arena);
+//	static uint8_t tensor_arena[tensor_arena_size];
+//	__attribute__((section(".ccmram"))) volatile uint8_t tensor_arena[tensor_arena_size];
 
-//	static tflite::MicroInterpreter static_interpreter(model, micro_op_resolver, tensor_arena, tensor_arena_size);
 
-//	TfLiteStatus allocate_status = static_interpreter.AllocateTensors();
-//	if( allocate_status != kTfLiteOk)
-//	{
-//		TF_LITE_REPORT_ERROR(error_reporter, "AllocateTensor() failed");
-//		return 1;
-//	}
-//
-//	input = static_interpreter.input(0);
-//	output = static_interpreter.output(0);
+//	extern uint8_t tensor_arena[];
+
+	static tflite::MicroInterpreter static_interpreter(model, micro_op_resolver,tensor_arena, tensor_arena_size);
+
+	char msg[64];
+	snprintf(msg, sizeof(msg), "Arena addr: 0x%08X, size=%lu\r\n", (unsigned int)tensor_arena, sizeof(tensor_arena));
+	HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
+
+	TfLiteStatus allocate_status = static_interpreter.AllocateTensors();
+	if (allocate_status != kTfLiteOk)
+	{
+	    const char* err_msg = "❌ AllocateTensor() failed\r\n";
+	    HAL_UART_Transmit(&huart1, (uint8_t*)err_msg, strlen(err_msg), HAL_MAX_DELAY);
+	    return 1;
+	}
+
+	const char* success_msg = "✅ AllocateTensors() success\r\n";
+	HAL_UART_Transmit(&huart1, (uint8_t*)success_msg, strlen(success_msg), HAL_MAX_DELAY);
+	char uart_buf[128];  // Reusable buffer
+
+	input = static_interpreter.input(0);
+	output = static_interpreter.output(0);
+
+	// Print input tensor info
+	snprintf(uart_buf, sizeof(uart_buf), "Input tensor: %s, bytes=%d, dims=[", input->name, input->bytes);
+	HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+	for (int i = 0; i < input->dims->size; i++) {
+	    snprintf(uart_buf, sizeof(uart_buf), "%d", input->dims->data[i]);
+	    HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+	    if (i != input->dims->size - 1) {
+	        const char* sep = "x";
+	        HAL_UART_Transmit(&huart1, (uint8_t*)sep, strlen(sep), HAL_MAX_DELAY);
+	    }
+	}
+	const char* input_close = "]\r\n";
+	HAL_UART_Transmit(&huart1, (uint8_t*)input_close, strlen(input_close), HAL_MAX_DELAY);
+
+	// Print output tensor info
+	snprintf(uart_buf, sizeof(uart_buf), "Output tensor: %s, bytes=%d, dims=[", output->name, output->bytes);
+	HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+	for (int i = 0; i < output->dims->size; i++) {
+	    snprintf(uart_buf, sizeof(uart_buf), "%d", output->dims->data[i]);
+	    HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+	    if (i != output->dims->size - 1) {
+	        const char* sep = "x";
+	        HAL_UART_Transmit(&huart1, (uint8_t*)sep, strlen(sep), HAL_MAX_DELAY);
+	    }
+	}
+	const char* output_close = "]\r\n";
+	HAL_UART_Transmit(&huart1, (uint8_t*)output_close, strlen(output_close), HAL_MAX_DELAY);
 
 	/* --- End of Tiny-ML Initialization --- */
 
@@ -161,12 +242,12 @@ int main(void)
 
 			/* invoke interpreter and print the results */
 			uint32_t initial = HAL_GetTick();
-//			TfLiteStatus invoke_status = static_interpreter.Invoke();
-//			if( invoke_status != kTfLiteOk)
-//			{
-//				TF_LITE_REPORT_ERROR(error_reporter, "Invoke() failed");
-//				return 1;
-//			}
+			TfLiteStatus invoke_status = static_interpreter.Invoke();
+			if( invoke_status != kTfLiteOk)
+			{
+				TF_LITE_REPORT_ERROR(error_reporter, "Invoke() failed");
+				return 1;
+			}
 			uint32_t current = HAL_GetTick();
 
 			int8_t result = get_top_prediction(output->data.int8, kNumberOfOutputs);
@@ -177,6 +258,17 @@ int main(void)
 		}
 	}
 }
+
+//int main(void)
+//{
+//    HAL_Init();
+//    SystemClock_Config();
+//    MX_USART1_UART_Init();
+////    MX_USART1_UART_Init();
+//    char *msg = "UART1 is working\r\n";
+//    HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+//}
+
 
 
 static uint8_t get_top_prediction(const int8_t* predictions, uint8_t num_categories) {
@@ -485,6 +577,38 @@ static void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
   HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5);
+}
+
+
+
+void MX_USART1_UART_Init(void)
+{
+    __HAL_RCC_USART1_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    // PA9 = TX
+    GPIO_InitStruct.Pin = GPIO_PIN_9;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;   // or GPIO_PULLUP
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART1;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    // PA10 = RX
+    GPIO_InitStruct.Pin = GPIO_PIN_10;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    huart1.Instance = USART1;
+    huart1.Init.BaudRate = 115200;
+    huart1.Init.WordLength = UART_WORDLENGTH_8B;
+    huart1.Init.StopBits = UART_STOPBITS_1;
+    huart1.Init.Parity = UART_PARITY_NONE;
+    huart1.Init.Mode = UART_MODE_TX_RX;
+    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+    HAL_UART_Init(&huart1);
 }
 
 

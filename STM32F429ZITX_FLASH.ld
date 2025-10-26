@@ -63,6 +63,7 @@ MEMORY
 {
     RAM	(xrw)	: ORIGIN = 0x20000000,	LENGTH = 192K
     ROM	(rx)	: ORIGIN = 0x8000000,	LENGTH = 2048K
+    CCMRAM (xrw) : ORIGIN = 0x10000000, LENGTH = 64K
 }
 
 /* Sections */
@@ -176,6 +177,14 @@ SECTIONS
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
   } >RAM
+  
+  /* TensorFlow tensor arena goes into CCMRAM */
+	.ccmram (NOLOAD):
+	{
+	  . = ALIGN(4);
+	  *(.ccmram)
+	  . = ALIGN(4);
+	} >CCMRAM
 
   /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */
   ._user_heap_stack :
