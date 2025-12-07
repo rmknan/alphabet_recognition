@@ -43,7 +43,7 @@ void Error_Handler(void);
 #define TRANSFORMED_HEIGHT  28U
 #define TRANSFORMED_WIDTH	28U
 
-#define kNumberOfOutputs 	10U
+#define kNumberOfOutputs 	26U
 
 /* Private global variables */
 static uint8_t _run_model = 0;
@@ -57,13 +57,16 @@ static void prepare_working_window(void);
 static void rgb2gray(void);
 static void resize_bilnear(void);
 static void update_tensor_input(TfLiteTensor * in);
+//static void debug_view_input(TfLiteTensor * in);
 static uint8_t get_top_prediction(const int8_t* predictions, uint8_t num_categories);
 static void print_result(uint8_t number, uint32_t tim);
 
 void MX_USART1_UART_Init(void);
 void Error_Handler(void);
 
-__attribute__((section(".ccmram"))) uint8_t tensor_arena[64 * 1024];
+
+//static uint8_t tensor_arena[63 * 1024]; // No section attribute → goes to .bss
+
 
 UART_HandleTypeDef huart1;
 
@@ -84,6 +87,7 @@ int main(void)
 
 	/* Hal Init */
 	HAL_Init();
+	char uart_buf[128];
 
 	/* Configure the system clock to 168 MHz */
 	SystemClock_Config();
@@ -108,6 +112,19 @@ int main(void)
 
 	/* Initialize the LCD */
 	BSP_LCD_Init();
+//	uint8_t* tensor_arena = (uint8_t*)0xD0100000;
+	static uint8_t tensor_arena[150 * 1024]; // Try 150KB first
+	const int tensor_arena_size = sizeof(tensor_arena);
+
+	// 3. OPTIONAL: Sanity Check - Write and Read SDRAM
+	    // This proves SDRAM is alive before TensorFlow touches it
+	tensor_arena[0] = 0xAA;
+	tensor_arena[1] = 0xBB;
+	if(tensor_arena[0] != 0xAA || tensor_arena[1] != 0xBB) {
+		 HAL_UART_Transmit(&huart1, (uint8_t*)"❌ SDRAM Fail\n", 14, 100);
+		 Error_Handler();
+	}
+
 	MX_USART1_UART_Init();
 
 	/* Layer2 Init */
@@ -160,13 +177,20 @@ int main(void)
 		return 1;
 	}
 
-	static tflite::MicroMutableOpResolver<4> micro_op_resolver;
+	static tflite::MicroMutableOpResolver<10> micro_op_resolver;
 	micro_op_resolver.AddConv2D();
 	micro_op_resolver.AddMaxPool2D();
 	micro_op_resolver.AddFullyConnected();
 	micro_op_resolver.AddReshape();
 
-	const int tensor_arena_size = sizeof(tensor_arena);
+	// --- ADD THESE NEW LINES ---
+	micro_op_resolver.AddSoftmax(); // Required for the final output (probabilities)
+	micro_op_resolver.AddRelu();    // Required for most internal layers
+	micro_op_resolver.AddRelu6();   // Often used in quantized models, safer to add it
+	micro_op_resolver.AddQuantize(); // Sometimes needed if the model has explicit quant nodes
+	micro_op_resolver.AddDequantize(); // Sometimes needed for input/output conversion
+
+//	const int tensor_arena_size = sizeof(tensor_arena);
 //	static uint8_t tensor_arena[tensor_arena_size];
 //	__attribute__((section(".ccmram"))) volatile uint8_t tensor_arena[tensor_arena_size];
 
@@ -174,23 +198,36 @@ int main(void)
 //	extern uint8_t tensor_arena[];
 
 	static tflite::MicroInterpreter static_interpreter(model, micro_op_resolver,tensor_arena, tensor_arena_size);
+	/* Update the interpreter constructor to use the new pointer and size */
 
 	char msg[64];
-	snprintf(msg, sizeof(msg), "Arena addr: 0x%08X, size=%lu\r\n", (unsigned int)tensor_arena, sizeof(tensor_arena));
+
+
+	// We cast to (unsigned long) to satisfy the %lu format specifier safely
+	snprintf(msg, sizeof(msg), "Arena addr: 0x%08X, size=%lu\r\n", (unsigned int)tensor_arena, (unsigned long)tensor_arena_size);
 	HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
 
 
 	TfLiteStatus allocate_status = static_interpreter.AllocateTensors();
 	if (allocate_status != kTfLiteOk)
-	{
-	    const char* err_msg = "❌ AllocateTensor() failed\r\n";
-	    HAL_UART_Transmit(&huart1, (uint8_t*)err_msg, strlen(err_msg), HAL_MAX_DELAY);
-	    return 1;
-	}
+	    {
+	        snprintf(uart_buf, sizeof(uart_buf),
+	                 "❌ AllocateTensors failed. Arena used: %d / %d\r\n",
+	                 static_interpreter.arena_used_bytes(), tensor_arena_size);
+	        HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+	        Error_Handler();
+	    }
+	    else {
+	        // --- NEW CODE: Print usage on success ---
+	        size_t used = static_interpreter.arena_used_bytes();
+	        snprintf(uart_buf, sizeof(uart_buf),
+	                 "✅ AllocateTensors() success! Arena used: %d / %d bytes\r\n",
+	                 used, tensor_arena_size);
+	        HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, strlen(uart_buf), HAL_MAX_DELAY);
+	    }
 
-	const char* success_msg = "✅ AllocateTensors() success\r\n";
-	HAL_UART_Transmit(&huart1, (uint8_t*)success_msg, strlen(success_msg), HAL_MAX_DELAY);
-	char uart_buf[128];  // Reusable buffer
+
+//	char uart_buf[128];  // Reusable buffer
 
 	input = static_interpreter.input(0);
 	output = static_interpreter.output(0);
@@ -240,6 +277,9 @@ int main(void)
 			/* data from buffer to tensor input */
 			update_tensor_input(input);
 
+			// A mini image of the input
+//			debug_view_input(input);
+
 			/* invoke interpreter and print the results */
 			uint32_t initial = HAL_GetTick();
 			TfLiteStatus invoke_status = static_interpreter.Invoke();
@@ -259,14 +299,31 @@ int main(void)
 	}
 }
 
-//int main(void)
-//{
-//    HAL_Init();
-//    SystemClock_Config();
-//    MX_USART1_UART_Init();
-////    MX_USART1_UART_Init();
-//    char *msg = "UART1 is working\r\n";
-//    HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+//static void debug_view_input(TfLiteTensor * in) {
+//    // Draw the 28x28 input tensor to the bottom-right of the screen
+//    // so we can see if it is rotated wrong.
+//    int start_x = 180;
+//    int start_y = 250;
+//    int scale_disp = 2; // Make it 2x bigger so we can see it
+//
+//    for (int y = 0; y < 28; y++) {
+//        for (int x = 0; x < 28; x++) {
+//            // Get the value from the tensor (int8: -128 to 127)
+//            int8_t val = in->data.int8[(y * 28) + x];
+//
+//            // If it's "black" (part of the letter), draw it RED
+//            // Adjust threshold as needed (e.g., > -100)
+//            if (val > -100) {
+//                BSP_LCD_SetTextColor(LCD_COLOR_RED);
+//            } else {
+//                BSP_LCD_SetTextColor(LCD_COLOR_WHITE);
+//            }
+//
+//            BSP_LCD_FillRect(start_x + (x * scale_disp),
+//                             start_y + (y * scale_disp),
+//                             scale_disp, scale_disp);
+//        }
+//    }
 //}
 
 
@@ -288,7 +345,24 @@ static uint8_t get_top_prediction(const int8_t* predictions, uint8_t num_categor
 }
 
 /* print the results on the screen */
-static void print_result(uint8_t number, uint32_t time)
+//static void print_result(uint8_t number, uint32_t time)
+//{
+//	static uint8_t op_buffer[30];
+//	static uint32_t color = BSP_LCD_GetTextColor(); // saves the color in the pen
+//
+//	BSP_LCD_SetTextColor(LCD_COLOR_WHITE);
+//	BSP_LCD_FillRect(67, (BSP_LCD_GetYSize()-90), 150, 70); // Clear the result windows if there are something
+//	BSP_LCD_SetTextColor(LCD_COLOR_BLACK); //The result will be print with black
+//
+//	snprintf((char *)op_buffer, 30, (char *)"The number is: %c", number);
+//	BSP_LCD_DisplayStringAt(67, (BSP_LCD_GetYSize()-90),(uint8_t*)op_buffer, LEFT_MODE);
+//
+//	snprintf((char *)op_buffer, 30, (char *)"Time: %lu ms", time);
+//	BSP_LCD_DisplayStringAt(67, (BSP_LCD_GetYSize()-70), (uint8_t *)op_buffer, LEFT_MODE);
+//	BSP_LCD_SetTextColor(color); // back the color to the pen
+//}
+
+static void print_result(uint8_t index, uint32_t time)
 {
 	static uint8_t op_buffer[30];
 	static uint32_t color = BSP_LCD_GetTextColor(); // saves the color in the pen
@@ -297,7 +371,7 @@ static void print_result(uint8_t number, uint32_t time)
 	BSP_LCD_FillRect(67, (BSP_LCD_GetYSize()-90), 150, 70); // Clear the result windows if there are something
 	BSP_LCD_SetTextColor(LCD_COLOR_BLACK); //The result will be print with black
 
-	snprintf((char *)op_buffer, 30, (char *)"The number is: %u", number);
+	snprintf((char *)op_buffer, 30, (char *)"The letter is: %c", index + 'A');
 	BSP_LCD_DisplayStringAt(67, (BSP_LCD_GetYSize()-90),(uint8_t*)op_buffer, LEFT_MODE);
 
 	snprintf((char *)op_buffer, 30, (char *)"Time: %lu ms", time);
@@ -306,12 +380,44 @@ static void print_result(uint8_t number, uint32_t time)
 }
 
 /* copy the image to the input tensor */
+//static void update_tensor_input(TfLiteTensor * in)
+//{
+//	uint16_t idx;
+//	uint8_t * src = (uint8_t*) TRANSFORMED_FRAME_BUFFER;
+//	for(idx = 0; idx < in->bytes; idx++)
+//		in->data.int8[idx] = (int8_t)(src[idx] - 127); // the input is int8 and the image is in uint8 format
+//}
+
 static void update_tensor_input(TfLiteTensor * in)
 {
-	uint16_t idx;
-	uint8_t * src = (uint8_t*) TRANSFORMED_FRAME_BUFFER;
-	for(idx = 0; idx < in->bytes; idx++)
-		in->data.int8[idx] = (int8_t)(src[idx] - 127); // the input is int8 and the image is in uint8 format
+    uint8_t * src = (uint8_t*) TRANSFORMED_FRAME_BUFFER;
+
+    float scale = in->params.scale;
+    int32_t zero_point = in->params.zero_point;
+
+    // Use loop to Transpose the image (Rotate 90 degrees + Flip)
+    // We iterate through the TENSOR (28x28), but pick pixels from the SOURCE differently.
+    for(int y = 0; y < 28; y++) {
+        for(int x = 0; x < 28; x++) {
+
+            // Standard mapping:
+            // int src_index = (y * 28) + x;
+
+            // EMNIST Mapping (Transpose):
+            // We read column-wise instead of row-wise to match the dataset
+            int src_index = (x * 28) + y;
+
+            float pixel_f = (float)src[src_index] / 255.0f;
+            int32_t val = (int32_t)(pixel_f / scale) + zero_point;
+
+            // Clamp
+            if (val < -128) val = -128;
+            if (val > 127) val = 127;
+
+            // Write to the linear tensor buffer
+            in->data.int8[(y * 28) + x] = (int8_t)val;
+        }
+    }
 }
 
 static void check_touch(void)
